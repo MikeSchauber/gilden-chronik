@@ -1,0 +1,16 @@
+## Interface: 120100, 120105, 16001
+## Title: Gilden-Chronik
+## Notes: Sammelt Level, Berufe, Tode, Boss-Kills und (wenn freigegeben) Gold der Gilde für die Gilden-Chronik, jeden Levelaufstieg auch nachträglich. /gchr zeigt Status und Anleitung, auch über das Yak-Symbol an der Minimap.
+## Author: Ayky
+## Version: 1.5.0
+## SavedVariables: GildenChronikDB
+## IconTexture: Interface\AddOns\GildenChronik\media\yak
+## AddonCompartmentFunc: GildenChronik_OnAddonCompartmentClick
+# 16001 = Forever-Beta (geprüft 10.10.2026, Build 1.60.1), 1201xx = Midnight. Im Client prüfen:
+#   /dump select(4, GetBuildInfo())
+
+GildenChronik.lua
+Kills.lua
+Verlauf.lua
+UI.lua
+Options.lua
