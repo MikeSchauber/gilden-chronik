@@ -6,7 +6,7 @@
 
 local out = print
 local dir = (arg and arg[0] or ""):match("^(.*)[/\\]") or "."
-local addonDir = dir .. "/../"
+local addonDir = dir .. "/../GildenChronik/" -- Addon-Ordner (wird gezippt), tests/ liegt daneben
 dofile(dir .. "/wow.lua")
 
 local passed = 0
