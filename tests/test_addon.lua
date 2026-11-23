@@ -1,12 +1,12 @@
 -- Test des Addons ohne Spiel, gegen den API-Nachbau in wow.lua.
 --   lua tests/test_addon.lua                                     (Lua 5.1 bis 5.4)
 --   npx -y -p fengari-node-cli fengari tests/test_addon.lua      (ohne Lua, nur Node)
--- Prüft Login, Meldungen, Sammler-Modus, Boss-Versuche mit Postausgang und die Texte im
--- Fenster. Ob das Fenster im Spiel gut aussieht, kann der Test nicht sagen.
+-- Prüft Login, Meldungen, Sammler-Modus, Boss-Versuche mit Postausgang, Verlauf, Statistiken und die
+-- Texte im Fenster. Ob das Fenster im Spiel gut aussieht, kann der Test nicht sagen.
 
 local out = print
 local dir = (arg and arg[0] or ""):match("^(.*)[/\\]") or "."
-local addonDir = dir .. "/../GildenChronik/"
+local addonDir = dir .. "/../"
 dofile(dir .. "/wow.lua")
 
 local passed = 0
@@ -18,7 +18,7 @@ end
 local before = {}
 for k in pairs(_G) do before[k] = true end
 local ns = {}
-for _, file in ipairs({ "GildenChronik.lua", "Kills.lua", "Verlauf.lua", "UI.lua", "Options.lua" }) do
+for _, file in ipairs({ "GildenChronik.lua", "Kills.lua", "Verlauf.lua", "Statistik.lua", "UI.lua", "Options.lua" }) do
   assert(loadfile(addonDir .. file))("GildenChronik", ns)
 end
 local globals = {}
@@ -26,6 +26,7 @@ for k in pairs(_G) do
   if not before[k] then globals[#globals + 1] = k end
 end
 table.sort(globals)
+local startGlobals = before -- „before“ wird weiter unten anders benutzt
 check(table.concat(globals, ",") ==
   "GildenChronikFrame,GildenChronikMinimapButton,GildenChronik_OnAddonCompartmentClick,SLASH_GILDENCHRONIK1,SLASH_GILDENCHRONIK2",
   "keine versehentlichen Globals: " .. table.concat(globals, ","))
@@ -37,7 +38,8 @@ if io and io.open then
   -- WoW liest die Zeilen von oben nach unten, egal was im Kopf steht: Ursprung oben links.
   check(#tga == 18 + 64 * 64 * 4 and tga:byte(3) == 2 and tga:byte(17) == 32 and tga:byte(18) == 0x28,
     "Icon: 64×64, 32 Bit, unkomprimiert, Ursprung oben links")
-  check(toc:find("\nGildenChronik.lua\nKills.lua\nVerlauf.lua\nUI.lua\nOptions.lua\n", 1, true), ".toc: Dateien in dieser Reihenfolge")
+  toc = toc:gsub("\r\n", "\n") -- Git for Windows checkt mit CRLF aus
+  check(toc:find("\nGildenChronik.lua\nKills.lua\nVerlauf.lua\nStatistik.lua\nUI.lua\nOptions.lua\n", 1, true), ".toc: Dateien in dieser Reihenfolge")
 end
 
 local ui = GildenChronikFrame
@@ -296,8 +298,10 @@ local function option(label)
 end
 local goldCheck, mmCheck, collectorCheck, remindCheck = option("Ich teile mein Gold mit der Chronik"),
   option("Symbol an der Minimap anzeigen"), option("Ich sammle für die Gilde"), option("An /reload erinnern")
-check(goldCheck and mmCheck and collectorCheck and remindCheck, "vier Haken in den Einstellungen")
+local statsCheck = option("Ich teile meine Statistiken mit der Chronik")
+check(goldCheck and statsCheck and mmCheck and collectorCheck and remindCheck, "fünf Haken in den Einstellungen")
 check(not goldCheck:GetChecked() and GildenChronikDB.shareGold == nil, "Gold teilen ist aus")
+check(not statsCheck:GetChecked() and GildenChronikDB.shareStats == nil, "Statistiken teilen ist aus")
 check(mmCheck:GetChecked() and not collectorCheck:GetChecked() and remindCheck:GetChecked(), "Haken zeigen den Zustand")
 mmCheck:Click()
 check(GildenChronikDB.minimap.hide == true and not mm:IsShown(), "Haken weg blendet das Symbol aus")
@@ -332,17 +336,32 @@ takeSent()
 
 find("Button", "Speichern (/reload)"):Click()
 check(T.reloaded, "Speichern lädt die Oberfläche neu")
--- Gold teilen: sofort eine Meldung mit Gold, wieder aus: ohne
+-- Gold teilen (ab 1.7.0 nur an den Sammler): Im Gildenkanal hört jedes Addon mit, dort nie Gold. Ohne
+-- Sammler online kommt der Stand mit Gold in den Verlauf.
 takeSent()
 advance(60)
 goldCheck:Click()
 sent = takeSent()
-check(GildenChronikDB.shareGold == true and #sent == 1 and sent[1].msg:find("^1;12;HUNTER;12345;"), "Haken schickt das Gold sofort", sent[1] and sent[1].msg)
+check(GildenChronikDB.shareGold == true and #sent == 1 and sent[1].channel == "GUILD" and sent[1].msg:find("^1;12;HUNTER;;0;"),
+  "Haken meldet sofort, an die Gilde ohne Gold", sent[1] and sent[1].msg)
 check(GildenChronikDB.latest["Ayky-Blackrock"].m == 12345, "eigenes Gold gespeichert")
+local goldState = GildenChronikDB.history[#GildenChronikDB.history]
+check(goldState and goldState.w == "s" and goldState.m == 12345, "kein Sammler online: Stand mit Gold in den Verlauf")
+wipe(GildenChronikDB.history)
 ui:Show()
 advance(1)
-check(shows("Geht mit deinen Meldungen an die Chronik."), "Gold: geteilt")
+check(shows("Geht mit deinen Meldungen an die Chronik, nur an den Sammler."), "Gold: geteilt")
+-- Sammler online: dieselbe Meldung zusätzlich mit Gold an ihn geflüstert, dann braucht es keinen Tagesstand
+W.roster[3][3] = true
 advance(60)
+W.money = 12400
+fire("PLAYER_MONEY")
+sent = takeSent()
+check(#sent == 2 and sent[1].channel == "GUILD" and sent[1].msg:find("^1;12;HUNTER;;0;") and sent[2].channel == "WHISPER"
+  and sent[2].target == "Liriel-Blackrock" and sent[2].msg == (sent[1].msg:gsub("^1;12;HUNTER;;", "1;12;HUNTER;12400;")),
+  "Gold nur geflüstert, sonst dieselbe Meldung mit demselben Zeitpunkt", sent[2] and sent[2].msg)
+check(#GildenChronikDB.history == 0, "Gold beim Sammler: kein Tagesstand")
+W.roster[3][3] = false
 goldCheck:Click()
 sent = takeSent()
 check(GildenChronikDB.shareGold == nil and #sent == 1 and sent[1].msg:find("^1;12;HUNTER;;"), "ohne Haken wieder ohne Gold")
@@ -457,11 +476,14 @@ W.roster[3][3] = true
 fire("CHAT_MSG_ADDON", "GCHR", "C;1", "GUILD", "Liriel-Blackrock")
 advance(43) -- 5 bis 40 s zufällig, dazu 1,2 s zwischen den Nachrichten
 local all = takeSent()
-local wh = {}
+local wh, goldWhisper = {}, nil
 for _, m in ipairs(all) do
-  if m.channel == "WHISPER" then wh[#wh + 1] = m end
+  if m.channel == "WHISPER" and m.msg:find("^[KG];") then wh[#wh + 1] = m end
+  if m.channel == "WHISPER" and m.msg:find("^1;") then goldWhisper = m end
 end
 check(#wh == 2 and wh[1].target == "Liriel-Blackrock", "zwei Nachrichten an den Sammler")
+check(goldWhisper and goldWhisper.target == "Liriel-Blackrock" and goldWhisper.msg:find("^1;%d*;HUNTER;%d+;"),
+  "nachgelieferter Stand mit Gold nur geflüstert")
 check(wh[1].msg == table.concat({ "K", 1, kill.k, 663, 409, 9, 40, 1, kill.st, kill.t, "e", "", 1, "Lucifron",
   "Geschmolzener Kern", "raid" }, ";"), "Kopf: " .. wh[1].msg)
 check(wh[2].msg == "G;" .. kill.k .. ";1;" .. kill.g, "Gruppe: " .. wh[2].msg)
@@ -694,8 +716,8 @@ check(#ups == 1 and ups[1].c == me and ups[1].t == up.t and ups[1].l == 13 and u
   and ups[1].m == 50000 and ups[1].d == up.d and ups[1].p == up.p and ups[1].g == "Yakman" and not ups[1].a,
   "Levelaufstieg mit Gold, Toden, Berufen und Gilde im Verlauf")
 sent = takeSent()
-check(#sent == 1 and sent[1].msg == ("1;13;HUNTER;50000;%d;;%s;%d"):format(up.d, ID:lower(), up.t),
-  "Meldung mit Zeitpunkt des Levelaufstiegs", sent[1] and sent[1].msg)
+check(#sent == 1 and sent[1].msg == ("1;13;HUNTER;;%d;;%s;%d"):format(up.d, ID:lower(), up.t),
+  "Meldung mit Zeitpunkt des Levelaufstiegs, ohne Gold (kein Sammler online)", sent[1] and sent[1].msg)
 
 -- Ohne Sammler: vom Tag nur der letzte Stand, am nächsten Tag ein neuer
 advance(61)
@@ -941,9 +963,12 @@ for _, s in ipairs(db.snapshots) do
   if s.c == "Brakmor-Blackrock" and s.t == bt then copies = copies + 1 end
 end
 check(copies == 1 and ns.historyView().stats.dup == 1, "doppelt: nicht noch einmal gespeichert, aber bestätigt")
--- Twink des Accounts (noch ohne Konto): angenommen, Konto-ID gemerkt; Charakter eines anderen Kontos: nicht
+-- Twink des Accounts (noch ohne Konto): angenommen, aber ohne Konto-ID (ab 1.7.0 nur aus der Meldung des
+-- Charakters selbst, sonst könnte jedes Mitglied fremde Charaktere auf sein Konto ziehen); Charakter eines
+-- anderen Kontos: nicht
 fire("CHAT_MSG_ADDON", "GCHR", entry("Brakmortwink-Blackrock", bt, 5, B2), "WHISPER", "Brakmor-Blackrock")
-check(db.snapshots[#db.snapshots].c == "Brakmortwink-Blackrock" and db.links["Brakmortwink-Blackrock"] == B2, "Twink angenommen")
+check(db.snapshots[#db.snapshots].c == "Brakmortwink-Blackrock" and db.links["Brakmortwink-Blackrock"] == nil,
+  "Twink angenommen, Konto-ID nicht übernommen")
 local count1 = #db.snapshots
 fire("CHAT_MSG_ADDON", "GCHR", entry(me, bt, 5, B2), "WHISPER", "Brakmor-Blackrock")
 check(#db.snapshots == count1 and ns.historyView().stats.foreign == 1, "fremdes Konto abgelehnt")
@@ -968,6 +993,34 @@ got = db.latest["Brakmor-Blackrock"]
 check(got.l == 22 and got.t == T.now and got.rt == nil, "Zeitpunkt aus der Zukunft: Empfangszeit")
 advance(1)
 check(shows("Du sammelst. In dieser Sitzung von anderen nachgeliefert: 4 Stände, dazu 1 Stand schon da."), "Fenster als Sammler mit Zahlen")
+
+-- Ab 1.7.0: Meldung an die Gilde ohne Gold, dieselbe mit Gold geflüstert. Das Gold ergänzt den gerade
+-- gehörten Stand, statt einen zweiten mit demselben Zeitpunkt anzulegen.
+local gt = T.now
+local plain = "1;23;WARRIOR;;2;Bergbau=60;" .. B2 .. ";" .. gt
+local snapsNow = #db.snapshots
+fire("CHAT_MSG_ADDON", "GCHR", plain, "GUILD", "Brakmor-Blackrock")
+got = db.latest["Brakmor-Blackrock"]
+check(got.l == 23 and got.m == nil and got.t == gt and #db.snapshots == snapsNow + 1, "Meldung ohne Gold gespeichert")
+fire("CHAT_MSG_ADDON", "GCHR", (plain:gsub(";;2;", ";57000;2;")), "WHISPER", "Brakmor-Blackrock")
+check(#db.snapshots == snapsNow + 1 and db.latest["Brakmor-Blackrock"] == got and got.m == 57000,
+  "geflüstertes Gold ergänzt denselben Stand")
+advance(30)
+fire("CHAT_MSG_ADDON", "GCHR", "1;23;WARRIOR;;2;Bergbau=60;" .. B2 .. ";" .. T.now, "GUILD", "Brakmor-Blackrock")
+check(#db.snapshots == snapsNow + 1, "ohne Gold, sonst unverändert: nichts Neues")
+fire("CHAT_MSG_ADDON", "GCHR", "1;23;WARRIOR;58000;2;Bergbau=60;" .. B2 .. ";" .. T.now, "WHISPER", "Brakmor-Blackrock")
+check(#db.snapshots == snapsNow + 2 and db.latest["Brakmor-Blackrock"].m == 58000 and db.latest["Brakmor-Blackrock"].t == T.now,
+  "anderes Gold geflüstert: neuer Stand")
+fire("CHAT_MSG_ADDON", "GCHR", "1;5;MAGE;99;0;;;" .. T.now, "WHISPER", "Fremd-Blackrock")
+check(db.latest["Fremd-Blackrock"] == nil and #db.snapshots == snapsNow + 2, "geflüstert von Unbekannten: nichts")
+-- Gold ging nicht durch (Flüstern gesperrt), der Stand kommt mit Gold aus dem Verlauf: ergänzt
+advance(30)
+local gt2 = T.now
+fire("CHAT_MSG_ADDON", "GCHR", "1;24;WARRIOR;;2;Bergbau=50;" .. B2 .. ";" .. gt2, "GUILD", "Brakmor-Blackrock")
+local withoutGold = db.latest["Brakmor-Blackrock"]
+fire("CHAT_MSG_ADDON", "GCHR", entry("Brakmor-Blackrock", gt2, 24, B2), "WHISPER", "Brakmor-Blackrock")
+check(withoutGold.t == gt2 and withoutGold.m == 55000 and #db.snapshots == snapsNow + 3 and ns.historyView().stats.ok == 5,
+  "Verlauf mit Gold ergänzt den Stand ohne Gold")
 ns.setCollector(false)
 ui:Hide()
 takeSent()
@@ -1052,8 +1105,8 @@ fire("GUILD_ROSTER_UPDATE")
 check(db.roster == rosterNow, "leere Gildenliste nicht gespeichert")
 W.roster = rosterSaved
 SlashCmdList.GILDENCHRONIK("status")
-check(T.printed[#T.printed]:find("Gildenliste: 3 Mitglieder in Yakman", 1, true), "/gchr status nennt die Gildenliste",
-  T.printed[#T.printed])
+check(printedHas("Gildenliste: 3 Mitglieder in Yakman") and T.printed[#T.printed]:find("Statistik: ", 1, true),
+  "/gchr status nennt die Gildenliste, zuletzt die Statistik", T.printed[#T.printed])
 fire("CHAT_MSG_ADDON", "GCHR", "1;31;MAGE;;0;;;", "GUILD", "Liriel Mondschein")
 check(db.latest["Liriel Mondschein-Blackrock"] and db.latest["Liriel Mondschein-Blackrock"].l == 31, "Meldung mit Doppelnamen")
 local acked = sentOf("C", "WHISPER")
@@ -1214,5 +1267,356 @@ check(ns.sendNow() ~= nil and db.latest[meP].p == "Angeln=30,Erste Hilfe=75,Koch
   "alle Berufe, auch Erste Hilfe als sechster Wert: " .. tostring(db.latest[meP].p))
 W.professions, W.professionInfo = nil, nil
 takeSent()
+
+-- Statistiken (Statistik.lua) ----------------------------------------------
+
+local G = "|TInterface\\MoneyFrame\\UI-GoldIcon:0:0:2:0|t"
+local Sv = "|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t"
+local Cu = "|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t"
+check(ns.parseStatValue("5230") == 5230 and ns.parseStatValue("1.234.567") == 1234567 and ns.parseStatValue("12,345") == 12345
+  and ns.parseStatValue("1 234") == 1234 and ns.parseStatValue("--") == nil and ns.parseStatValue("1.5") == nil
+  and ns.parseStatValue("Ragnaros") == nil and ns.parseStatValue(42) == 42, "Werte wie im Fenster: Zahlen, Tausender-Trenner")
+local copper, isMoney = ns.parseStatValue("1.234" .. G .. " 5" .. Sv .. " 67" .. Cu)
+check(copper == 12340567 and isMoney == true, "Geld mit Münz-Symbolen in Kupfer: " .. tostring(copper))
+check(ns.parseStatValue("|cffffffff99|r" .. Cu) == 99, "Geld mit Farbcode")
+
+W.statCats = {
+  { id = 130, name = "Charakter", stats = {} },
+  { id = 140, name = "Vermögen", parent = 130, stats = {
+    { id = 328, name = "Insgesamt erhaltenes Gold", value = "12" .. G .. " 34" .. Sv .. " 56" .. Cu, flags = 1 },
+    { id = 753, name = "Durchschnittliches Gold pro Tag", value = "3", flags = 0x41 },
+  } },
+  { id = 128, name = "Siege", stats = {
+    { id = 1197, name = "Siege insgesamt", value = "5.400", flags = 9 },
+  } },
+  { id = 135, name = "Kreaturen", parent = 128, stats = {
+    { id = 107, name = "Kreaturen getötet", value = "5230", flags = 9 },
+    { id = 108, name = "Kleintiere getötet", value = "0", flags = 9 },
+  } },
+  { id = 14821, name = "Bosssiege", parent = 128, stats = {
+    { id = 15027, name = "Siege über Bazzalan", value = "--", skip = true, flags = 524289 },
+    { id = 15028, name = "Hilfserfolg", value = "--", skip = true, flags = 3 },
+    { id = 1098, name = "Siege über Edwin van Cleef", value = "2", flags = 1 },
+  } },
+  { id = 14807, name = "Kurioses", stats = {
+    { id = 2222, name = "Lieblingsboss", value = "Ragnaros", flags = 1 },
+  } },
+}
+W.creatures = { { id = 4948, name = "Bestien", quantity = 2100 }, { id = 4953, name = "Humanoid", quantity = 1800 },
+  { id = 4955, name = "Untoter", quantity = 0 } }
+wipe(db.history)
+wipe(db.outbox)
+local mine = ns.me()
+local function offline()
+  W.roster[3][3] = false
+  db.collectors["Liriel-Blackrock"] = T.now - 1000
+end
+local function online()
+  W.roster[3][3] = true
+  db.collectors["Liriel-Blackrock"] = T.now
+end
+local function today(t) return date("%Y-%m-%d", t) end
+local function keys(v)
+  local n = 0
+  for _ in pairs(v) do n = n + 1 end
+  return n
+end
+offline()
+ns.setShareGold(false)
+takeSent()
+ns.showWindow("status")
+
+-- Ohne Haken: nichts gelesen
+local diagBefore = db.diag.stats
+fire("PLAYER_ENTERING_WORLD")
+advance(20)
+check(next(db.stats) == nil and db.diag.stats == diagBefore and #db.statsOut == 0, "ohne Haken: nichts gelesen")
+check(shows("Werden nicht gesendet. Zum Teilen oben unter Einstellungen"), "Fenster: Statistik nicht geteilt")
+SlashCmdList.GILDENCHRONIK("diag")
+check(printedHas("  Statistiken: Nicht geteilt"), "/gchr diag: nicht geteilt")
+
+-- Haken an: nach 2 s alles lesen, ohne Vermögen (Gold nicht geteilt), Durchschnitte, Nullen, Ausgeblendetes, Texte
+statsCheck:Click()
+check(db.shareStats == true and statsCheck:GetChecked(), "Haken „Statistiken teilen“ gesetzt")
+advance(3)
+local v = db.stats[mine] and db.stats[mine].v
+check(v and v[107] == 5230 and v[1197] == 5400 and v[1098] == 2 and v["107:4948"] == 2100 and v["107:4953"] == 1800 and keys(v) == 5,
+  "gelesen: Zahlen mit Tausender-Trenner, Endboss, Kreaturtypen")
+check(v[328] == nil and v[753] == nil and v[108] == nil and v["107:4955"] == nil and v[15027] == nil and v[2222] == nil,
+  "ohne Vermögen, Durchschnitt, Nullen, Ausgeblendetes und Text")
+local sd = db.diag.stats
+check(sd.noGold == 1 and sd.categories == 6 and sd.statistics == 9 and sd.values == 3 and sd.criteria == 2, "Messdaten")
+local entry1 = db.statsOut[1]
+check(#db.statsOut == 1 and entry1.c == mine and keys(entry1.v) == 5 and entry1.d == today(entry1.t) and not entry1.a,
+  "erstes Lesen: alle Werte in den Postausgang")
+advance(130)
+check(#sentOf("S") == 0, "kein Sammler online: wartet")
+check(shows("1 Eintrag wartet auf den Sammler."), "Fenster: wartet auf den Sammler")
+SlashCmdList.GILDENCHRONIK("status")
+check(T.printed[#T.printed]:find("Statistik: 1 Eintrag wartet auf den Sammler.", 1, true), "/gchr status mit Statistik")
+SlashCmdList.GILDENCHRONIK("diag")
+check(printedHas("  Statistiken: 6 Kategorien, 9 Statistiken, 3 Werte, 2 Kreaturtypen, 1 zum Vermögen nicht geteilt"),
+  "/gchr diag: Statistiken")
+
+-- Sammler kommt online: per Flüstern, Werte sortiert
+W.roster[3][3] = true
+fire("CHAT_MSG_ADDON", "GCHR", "C;1", "GUILD", "Liriel-Blackrock")
+advance(95)
+local sp = sentOf("S", "WHISPER")
+check(#sp == 1 and sp[1].target == "Liriel-Blackrock"
+  and sp[1].msg == ("S;1;%s;%d;1;1;107=5230,107:4948=2100,107:4953=1800,1098=2,1197=5400"):format(mine, entry1.t),
+  "an den Sammler: " .. (sp[1] and sp[1].msg or "-"))
+check(entry1.a ~= nil, "als gesendet markiert")
+fire("CHAT_MSG_ADDON", "GCHR", ("Y;%s;%d"):format(mine, entry1.t), "GUILD", "Brakmor-Blackrock")
+check(#db.statsOut == 1, "Bestätigung nur von bekannten Sammlern")
+fire("CHAT_MSG_ADDON", "GCHR", ("Y;%s;%d"):format(mine, entry1.t), "GUILD", "Liriel-Blackrock")
+check(#db.statsOut == 0 and not ns.statsView().sending, "bestätigt: Postausgang leer")
+advance(2)
+check(shows("5 Werte gelesen") and shows("alles beim Sammler."), "Fenster: alles beim Sammler")
+
+-- Änderungen: nur Geändertes, höchstens jede Minute gelesen, derselbe Tag in einem Eintrag
+offline()
+W.statCats[4].stats[1].value = "5300"
+W.creatures[1].quantity = 2150
+fire("CRITERIA_UPDATE")
+advance(6)
+check(#db.statsOut == 1 and db.statsOut[1].v[107] == 5300 and db.statsOut[1].v["107:4948"] == 2150 and keys(db.statsOut[1].v) == 2,
+  "nur Geändertes in den Postausgang")
+W.statCats[3].stats[1].value = "5.401"
+fire("CRITERIA_UPDATE")
+advance(30)
+check(db.stats[mine].v[1197] == 5400, "höchstens jede Minute gelesen")
+advance(35)
+check(db.stats[mine].v[1197] == 5401 and #db.statsOut == 1 and db.statsOut[1].v[1197] == 5401 and db.statsOut[1].v[107] == 5300,
+  "derselbe Tag: ein Eintrag mit allen Änderungen")
+-- Gold teilen: sofort neu gelesen, jetzt mit Vermögen
+ns.setShareGold(true)
+advance(2)
+check(db.stats[mine].v[328] == 123456 and db.statsOut[1].v[328] == 123456 and db.diag.stats.noGold == 0
+  and db.stats[mine].v[753] == nil, "Gold geteilt: Vermögen sofort gelesen (ohne Durchschnitt)")
+wipe(db.history) -- Tagesstand der Meldung, der Verlauf hätte Vorrang
+takeSent()
+
+-- Ohne Bestätigung 10 Minuten Pause; eine späte Bestätigung hebt sie auf
+online()
+advance(125)
+sp = sentOf("S", "WHISPER")
+check(#sp == 1 and sp[1].msg:find(";1;1;107=5300,107:4948=2150,328=123456,1197=5401$"), "Änderungen an den Sammler: "
+  .. (sp[1] and sp[1].msg or "-"))
+advance(61)
+check(logHas("Statistiken: keine Bestätigung") and not ns.statsView().sending, "ohne Bestätigung: Pause")
+local zt = T.now - 100
+db.statsOut[#db.statsOut + 1] = { c = "Zweit-Blackrock", t = zt, d = today(zt), v = { [107] = 10, ["107:4948"] = 4 } }
+advance(300)
+check(#sentOf("S") == 0, "in der Pause nichts, auch kein anderer Eintrag")
+local first = db.statsOut[1]
+fire("CHAT_MSG_ADDON", "GCHR", ("Y;%s;%d"):format(first.c, first.t), "GUILD", "Liriel-Blackrock")
+advance(3)
+sp = sentOf("S", "WHISPER")
+check(#db.statsOut == 1 and #sp == 1 and sp[1].msg == ("S;1;Zweit-Blackrock;%d;1;1;107=10,107:4948=4"):format(zt),
+  "späte Bestätigung hebt die Pause auf, der Twink gleich danach")
+fire("CHAT_MSG_ADDON", "GCHR", ("Y;Zweit-Blackrock;%d"):format(zt), "GUILD", "Liriel-Blackrock")
+check(#db.statsOut == 0, "Twink bestätigt")
+advance(2)
+
+-- Verlauf hat Vorrang: Statistiken warten, bis er durch ist
+db.history[1] = { c = mine, t = T.now - 50, l = 14, cls = "HUNTER", d = 0, p = "", g = "Yakman", w = "l" }
+local st1 = T.now - 40
+db.statsOut[1] = { c = mine, t = st1, d = today(st1), v = { [107] = 5400 } }
+ns.pumpStats()
+check(#sentOf("S") == 0 and ns.historyDue(), "Verlauf fällig: Statistiken warten")
+ns.pumpHistory()
+check(#sentH() == 1, "erst der Verlauf")
+fire("CHAT_MSG_ADDON", "GCHR", ("Q;%s;%d"):format(mine, db.history[1].t), "GUILD", "Liriel-Blackrock")
+advance(3)
+sp = sentOf("S", "WHISPER")
+check(#db.history == 0 and #sp == 1 and sp[1].msg:find(("^S;1;%s;%d;1;1;107=5400$"):format(mine:gsub("%-", "%%-"), st1)),
+  "nach dem Verlauf die Statistiken")
+fire("CHAT_MSG_ADDON", "GCHR", ("Y;%s;%d"):format(mine, st1), "GUILD", "Liriel-Blackrock")
+advance(2)
+
+-- WoW blockiert mitten im Eintrag: nach einer Minute alles noch einmal; jede Nachricht höchstens 255 Byte
+local bigV = {}
+for i = 1, 30 do bigV[1000 + i] = 123456789 end
+local bt3 = T.now - 30
+db.statsOut[1] = { c = mine, t = bt3, d = today(bt3), v = bigV }
+ns.pumpStats()
+check(#sentOf("S") == 1, "erste Nachricht des Eintrags raus")
+T.sendResult = Enum.SendAddonMessageResult.AddonMessageThrottle
+advance(2)
+T.sendResult = 0
+takeSent()
+check(db.statsOut[1].a == nil and logHas("Statistiken: Senden an den Sammler blockiert (Nachricht 2 von 3)"),
+  "blockiert: gleich wieder fällig")
+advance(50)
+check(#sentOf("S") == 0, "kurz Pause")
+advance(80)
+sp = sentOf("S", "WHISPER")
+local back, okParts = {}, #sp == 3
+for i, m in ipairs(sp) do
+  local _, pv, pc, pt, pnr, pn, payload = strsplit(";", m.msg)
+  okParts = okParts and #m.msg <= 255 and pv == "1" and pc == mine and tonumber(pt) == bt3 and tonumber(pnr) == i and pn == "3"
+  for k, x in payload:gmatch("(%d+)=(%d+)") do back[tonumber(k)] = tonumber(x) end
+end
+check(okParts and keys(back) == 30 and back[1001] == 123456789 and back[1030] == 123456789, "drei Teile, zusammen alle Werte")
+fire("CHAT_MSG_ADDON", "GCHR", ("Y;%s;%d"):format(mine, bt3), "GUILD", "Liriel-Blackrock")
+advance(2)
+check(#db.statsOut == 0, "bestätigt")
+
+-- Mehr als 40 Teile: der Rest als eigener Eintrag eine Sekunde später
+local huge = {}
+for i = 1, 700 do huge[100000 + i] = 987654321012 end
+local hugeT = T.now - 20
+local he = { c = mine, t = hugeT, d = today(hugeT), v = huge }
+db.statsOut[1] = he
+local hm = ns.statMessages(he)
+local rest = db.statsOut[2]
+local okHuge = #hm == 40 and rest and rest.t == hugeT + 1 and keys(he.v) + keys(rest.v) == 700
+for i, m in ipairs(hm) do
+  okHuge = okHuge and #m <= 255 and m:find(("^S;1;%s;%d;%d;40;"):format(mine:gsub("%-", "%%-"), hugeT, i)) ~= nil
+end
+check(okHuge, "höchstens 40 Teile zu je 255 Byte, der Rest eine Sekunde später: " .. #hm .. "/" .. (rest and keys(rest.v) or 0))
+wipe(db.statsOut)
+
+-- Über 60 Einträge: der älteste wandert in den nächsten desselben Charakters
+offline()
+for i = 1, 60 do
+  local t = T.now - 86400 * (61 - i)
+  db.statsOut[i] = { c = "Dritt-Blackrock", t = t, d = today(t), v = { [107] = i, [2000 + i] = i } }
+end
+W.statCats[4].stats[1].value = "5500"
+ns.readStatsSoon(true)
+advance(2)
+local o = db.statsOut
+check(#o == 60 and o[1].c == "Dritt-Blackrock" and o[1].v[107] == 2 and o[1].v[2001] == 1 and o[1].v[2002] == 2
+  and o[60].c == mine and o[60].v[107] == 5500, "über 60: der älteste in den nächsten desselben Charakters")
+
+-- Haken weg: Postausgang und letzter Stand verworfen
+statsCheck:Click()
+advance(1)
+check(db.shareStats == nil and #db.statsOut == 0 and next(db.stats) == nil and logHas("Statistiken nicht mehr geteilt"),
+  "Haken weg: alles Eigene verworfen")
+check(shows("Werden nicht gesendet."), "Fenster: wieder nicht geteilt")
+
+-- Client ohne Statistikfenster: Hinweis statt Werte
+local statList = GetStatisticsCategoryList
+GetStatisticsCategoryList = nil
+statsCheck:Click()
+advance(3)
+check(db.diag.stats.available == false and next(db.stats) == nil and #db.statsOut == 0, "ohne Statistikfenster: nichts gelesen")
+check(shows("Nicht verfügbar: Dieser Client hat kein Statistikfenster."), "Fenster: nicht verfügbar")
+GetStatisticsCategoryList = statList
+
+-- GetStatistic ohne ID (dritter Wert): ID über den Erfolg an dieser Stelle
+W.statNoId = true
+ns.readStatsSoon(true)
+advance(2)
+W.statNoId = nil
+check(db.stats[mine] and db.stats[mine].v[107] == 5500 and db.stats[mine].v[328] == 123456 and #db.statsOut == 1,
+  "ID über GetAchievementInfo(Kategorie, Index)")
+
+-- Sammler werden: eigener Postausgang in die Datei, Katalog mit Namen
+local ownOut = db.statsOut[1]
+local readingsBefore = #db.statReadings
+ns.setCollector(true)
+takeSent()
+local lastReading = db.statReadings[#db.statReadings]
+check(#db.statsOut == 0 and #db.statReadings == readingsBefore + 1 and lastReading.c == mine and lastReading.t == ownOut.t
+  and lastReading.rt == T.now and lastReading.v[107] == 5500, "Sammler werden: eigener Postausgang in die Datei")
+advance(2)
+local cat = db.statCatalog
+check(cat and cat.t == T.now - 1 and cat.checked == cat.t and cat.build == "12.1.0.65000" and cat.locale == "deDE",
+  "Katalog gelesen, mit Build und Sprache")
+local function catStat(id)
+  for _, s in ipairs(cat.s) do
+    if s.id == id then return s end
+  end
+end
+local c135
+for _, c in ipairs(cat.c) do
+  if c.id == 135 then c135 = c end
+end
+check(#cat.c == 6 and #cat.s == 8 and #cat.k == 3 and catStat(15027).h == true and catStat(15028) == nil
+  and catStat(107).c == 135 and catStat(107).pos == 1 and catStat(107).f == 9 and catStat(107).n == "Kreaturen getötet",
+  "Katalog: ausgeblendete Endbosse mit h, ohne versteckte Hilfs-Erfolge")
+check(c135.p == 128 and c135.pos == 1 and cat.c[1].p == nil and cat.c[1].pos == 1 and cat.k[1].s == 107 and cat.k[1].id == 4948
+  and cat.k[1].n == "Bestien", "Kategorien mit Oberkategorie, Kreaturtypen")
+check(#db.statReadings == readingsBefore + 1, "unverändert gelesen: kein neuer Stand")
+
+-- Sammler empfängt: Teile in beliebiger Reihenfolge, speichern mit rt, Bestätigung an die Gilde
+local rt0 = T.now - 600
+local p1 = ("S;1;Brakmor-Blackrock;%d;1;2;107=4100,107:4955=900"):format(rt0)
+local p2 = ("S;1;Brakmor-Blackrock;%d;2;2;98=380,114=7"):format(rt0)
+fire("CHAT_MSG_ADDON", "GCHR", p2, "WHISPER", "Brakmor-Blackrock")
+check(#db.statReadings == readingsBefore + 1, "unvollständig: noch nichts gespeichert")
+fire("CHAT_MSG_ADDON", "GCHR", p1, "WHISPER", "Brakmor-Blackrock")
+local r = db.statReadings[#db.statReadings]
+check(#db.statReadings == readingsBefore + 2 and r.c == "Brakmor-Blackrock" and r.t == rt0 and r.rt == T.now and r.v[107] == 4100
+  and r.v["107:4955"] == 900 and r.v[98] == 380 and r.v[114] == 7, "zusammengesetzt und gespeichert")
+advance(2)
+local ys = sentOf("Y", "GUILD")
+check(#ys == 1 and ys[1].msg == ("Y;Brakmor-Blackrock;%d"):format(rt0), "Bestätigung an die Gilde")
+fire("CHAT_MSG_ADDON", "GCHR", p1, "WHISPER", "Brakmor-Blackrock")
+fire("CHAT_MSG_ADDON", "GCHR", p2, "WHISPER", "Brakmor-Blackrock")
+advance(2)
+check(#db.statReadings == readingsBefore + 2 and #sentOf("Y", "GUILD") == 1, "doppelt: einmal bestätigt, nicht gespeichert")
+-- Twink des Absenders: angenommen; Charakter eines anderen Kontos: abgelehnt, aber bestätigt
+fire("CHAT_MSG_ADDON", "GCHR", ("S;1;Brakmortwink-Blackrock;%d;1;1;107=12"):format(rt0), "WHISPER", "Brakmor-Blackrock")
+fire("CHAT_MSG_ADDON", "GCHR", ("S;1;%s;%d;1;1;107=1"):format(mine, rt0), "WHISPER", "Brakmor-Blackrock")
+check(#db.statReadings == readingsBefore + 3 and db.statReadings[#db.statReadings].c == "Brakmortwink-Blackrock",
+  "Twink angenommen, fremdes Konto nicht")
+-- Unbekannte, falsche Version und Gildenkanal: nichts; Zeitpunkt aus der Zukunft oder zu viele Teile: bestätigt
+fire("CHAT_MSG_ADDON", "GCHR", ("S;1;Fremd-Blackrock;%d;1;1;107=1"):format(rt0), "WHISPER", "Fremd-Blackrock")
+fire("CHAT_MSG_ADDON", "GCHR", ("S;2;Brakmor-Blackrock;%d;1;1;107=1"):format(rt0 + 1), "WHISPER", "Brakmor-Blackrock")
+fire("CHAT_MSG_ADDON", "GCHR", ("S;1;Brakmor-Blackrock;%d;1;1;107=1"):format(rt0 + 2), "GUILD", "Brakmor-Blackrock")
+fire("CHAT_MSG_ADDON", "GCHR", ("S;1;Brakmor-Blackrock;%d;1;1;107=1"):format(T.now + 3600), "WHISPER", "Brakmor-Blackrock")
+fire("CHAT_MSG_ADDON", "GCHR", ("S;1;Brakmor-Blackrock;%d;1;41;107=1"):format(rt0 + 3), "WHISPER", "Brakmor-Blackrock")
+advance(8)
+ys = sentOf("Y", "GUILD")
+local yset = {}
+for _, m in ipairs(ys) do yset[m.msg] = true end
+check(#db.statReadings == readingsBefore + 3 and #ys == 4 and yset[("Y;Brakmortwink-Blackrock;%d"):format(rt0)]
+  and yset[("Y;%s;%d"):format(mine, rt0)] and yset[("Y;Brakmor-Blackrock;%d"):format(T.now - 8 + 3600)]
+  and yset[("Y;Brakmor-Blackrock;%d"):format(rt0 + 3)], "nur Gültiges gespeichert, Kaputtes und Abgelehntes bestätigt")
+-- Unvollständiges verfällt nach 120 s
+fire("CHAT_MSG_ADDON", "GCHR", ("S;1;Brakmor-Blackrock;%d;1;2;107=4200"):format(rt0 + 60), "WHISPER", "Brakmor-Blackrock")
+advance(121)
+fire("CHAT_MSG_ADDON", "GCHR", ("S;1;Brakmor-Blackrock;%d;2;2;98=390"):format(rt0 + 60), "WHISPER", "Brakmor-Blackrock")
+check(#db.statReadings == readingsBefore + 3, "Teile nach mehr als 120 s nicht mehr zusammengesetzt")
+takeSent()
+
+-- Eigene Statistiken des Sammlers direkt in die Datei
+W.statCats[4].stats[1].value = "5600"
+fire("CRITERIA_UPDATE")
+advance(70)
+local own = db.statReadings[#db.statReadings]
+check(own.c == mine and own.v[107] == 5600 and keys(own.v) == 1 and own.rt == own.t and #db.statsOut == 0,
+  "Sammler: eigene Statistiken direkt in die Datei")
+check(shows("Du sammelst. Deine eigenen stehen direkt in deiner Datei, von anderen in dieser Sitzung: 2 Stände, dazu 1 Stand schon da."),
+  "Fenster als Sammler")
+SlashCmdList.GILDENCHRONIK("diag")
+check(printedHas("empfangen 2, 1 schon da, 3 ungültig, 1 von Unbekannten, 1 fremdes Konto, 1 unvollständig"), "/gchr diag als Sammler")
+-- Ohne Haken: eigene Stände aus der Datei, die der anderen bleiben, Empfang geht weiter
+statsCheck:Click()
+local ownLeft, othersLeft = 0, 0
+for _, x in ipairs(db.statReadings) do
+  if x.c == mine then ownLeft = ownLeft + 1 elseif x.c:find("^Brakmor") then othersLeft = othersLeft + 1 end
+end
+check(ownLeft == 0 and othersLeft == 2, "Sammler ohne Haken: eigene Stände verworfen, die der anderen bleiben")
+fire("CHAT_MSG_ADDON", "GCHR", ("S;1;Brakmor-Blackrock;%d;1;1;107=4300"):format(rt0 + 120), "WHISPER", "Brakmor-Blackrock")
+check(db.statReadings[#db.statReadings].v[107] == 4300, "Sammler ohne Haken nimmt die der anderen weiter an")
+ns.setCollector(false)
+ui:Hide()
+W.statCats, W.creatures = nil, nil
+takeSent()
+
+-- Auch zur Laufzeit keine versehentlichen Globals (z. B. ein vergessenes local in einer Funktion)
+local late = {}
+for k in pairs(_G) do
+  if not startGlobals[k] then late[#late + 1] = k end
+end
+table.sort(late)
+check(table.concat(late, ",") == "GildenChronikDB," .. table.concat(globals, ","),
+  "keine Globals zur Laufzeit außer den SavedVariables: " .. table.concat(late, ","))
 
 out(("OK: %d Prüfungen"):format(passed))

@@ -244,6 +244,65 @@ function GetProfessionInfo(i)
   if p then return p[1], 136000, p[2], 300, 0, 0, 0, 0 end
 end
 
+-- Fenster „Statistiken“ (Forever-FrameXML Blizzard_Statistics): W.statCats = { { id =, name =, parent =,
+-- stats = { { id =, name =, value = Text wie im Fenster, skip =, flags = } } } }, W.creatures = Kriterien von
+-- „Kreaturen getötet“ (107): { { id =, name =, quantity = } }. W.statNoId: GetStatistic ohne dritten Wert.
+local function statCat(id)
+  for _, c in ipairs(W.statCats or {}) do
+    if c.id == id then return c end
+  end
+end
+local function statById(id)
+  for _, c in ipairs(W.statCats or {}) do
+    for _, s in ipairs(c.stats) do
+      if s.id == id then return s end
+    end
+  end
+end
+function GetStatisticsCategoryList()
+  local out = {}
+  for _, c in ipairs(W.statCats or {}) do out[#out + 1] = c.id end
+  return out
+end
+-- title, parentCategoryID (-1 = oberste Ebene), flags
+function GetCategoryInfo(id)
+  local c = statCat(id)
+  if c then return c.name, c.parent or -1, 0 end
+end
+-- numItems, numCompleted, numIncomplete
+function GetCategoryNumAchievements(id)
+  local c = statCat(id)
+  local n = c and #c.stats or 0
+  return n, 0, n
+end
+-- (Kategorie, Index): Wert als Text, skip, ID; (ID): Wert als Text
+function GetStatistic(a, b)
+  if b == nil then
+    local s = statById(a)
+    return s and s.value or "--"
+  end
+  local c = statCat(a)
+  local s = c and c.stats[b]
+  if s then return s.value, s.skip or false, (not W.statNoId) and s.id or nil end
+end
+-- (ID) oder (Kategorie, Index): id, name, points, completed, month, day, year, description, flags, icon, …
+function GetAchievementInfo(a, b)
+  local s
+  if b ~= nil then
+    local c = statCat(a)
+    s = c and c.stats[b]
+  else
+    s = statById(a)
+  end
+  if s then return s.id, s.name, 0, false, nil, nil, nil, "", s.flags or 1, 0, "", false, false, nil end
+end
+function GetAchievementNumCriteria(id) return id == 107 and #(W.creatures or {}) or 0 end
+-- criteriaString, criteriaType, completed, quantity, reqQuantity, charName, flags, assetID, quantityString, criteriaID, eligible
+function GetAchievementCriteriaInfo(id, i)
+  local k = id == 107 and W.creatures and W.creatures[i]
+  if k then return k.name, 0, false, k.quantity, 0, "", 0, 0, tostring(k.quantity), k.id, true end
+end
+
 C_UI = { Reload = function() T.reloaded = true end }
 C_AddOns = { GetAddOnMetadata = function() return "0.0.0" end }
 UISpecialFrames = {}

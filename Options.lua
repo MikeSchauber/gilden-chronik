@@ -157,9 +157,14 @@ local function option(label, note, get, set)
 end
 
 option("Ich teile mein Gold mit der Chronik",
-  "Aus: Dein Gold geht nicht an die Chronik, auch nicht an dein eigenes Konto. An: Das Addon schickt es mit, wer es in der Web-App sieht, legst du dort unter Mein Profil mit „Gold teilen“ fest. Gilt für alle Charaktere dieses Accounts, schon gesendetes Gold bleibt in der Chronik.",
+  "Aus: Dein Gold geht nicht an die Chronik, auch nicht an dein eigenes Konto. An: Das Addon schickt es mit, aber nur an den Sammler, nicht an die ganze Gilde. Wer es in der Web-App sieht, legst du dort unter Mein Profil mit „Gold teilen“ fest. Gilt für alle Charaktere dieses Accounts, schon gesendetes Gold bleibt in der Chronik.",
   function() return ns.sharesGold() end,
   function(on) ns.setShareGold(on) end)
+
+option("Ich teile meine Statistiken mit der Chronik",
+  "Aus: Das Addon liest und schickt keine Statistiken. An: Es liest die Statistiken aus deinem Charakterfenster (Kreaturen, Quests, Dungeons, Endbosse, Tode …) und schickt Änderungen dem Sammler, Vermögen nur zusätzlich mit „Gold teilen“. Wer sie in der Web-App sieht, legst du dort unter Mein Profil mit „Statistiken teilen“ fest. Gilt für alle Charaktere dieses Accounts. Ausschalten verwirft, was noch nicht beim Sammler ist.",
+  function() return ns.sharesStats() end,
+  function(on) ns.setShareStats(on) end)
 
 option("Symbol an der Minimap anzeigen",
   "Linksklick öffnet das Fenster, Rechtsklick diese Einstellungen, mit gedrückter Maustaste verschieben. Ohne Symbol geht es weiter über /gchr und das Addon-Menü an der Minimap.",

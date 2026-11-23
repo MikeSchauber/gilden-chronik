@@ -166,6 +166,13 @@ local function due(t)
   return list
 end
 
+-- Der Verlauf hat gerade etwas zu senden: Dann warten die Statistiken (Statistik.lua). Nicht in der
+-- Pause nach einer Runde ohne Bestätigung, sonst kämen die Statistiken nie dran.
+function ns.historyDue()
+  if not DB or ns.isCollector() or #DB.history == 0 or now() < quietUntil then return false end
+  return #due(now()) > 0
+end
+
 -- „H;1;<Charakter>;<Zeit>;<Level>;<Klasse>;<Kupfer>;<Tode>;<Berufe>;<Konto-ID>“, höchstens 255 Byte:
 -- notfalls ohne Konto-ID, dann die Berufe von hinten gekürzt
 local function message(e)
@@ -196,16 +203,16 @@ local function finish(my, note, pause)
 end
 
 -- Schon in der Datei? Derselbe Charakter und Zeitpunkt, oder dieselben Werte ein paar Sekunden
--- daneben (Meldung eines Addons vor 1.1.0, gespeichert mit der Empfangszeit)
+-- daneben (Meldung eines Addons vor 1.1.0, gespeichert mit der Empfangszeit). Liefert den Stand.
 local function known(s)
   local snaps = DB.snapshots
   for i = #snaps, 1, -1 do
     local x = snaps[i]
     if x.c == s.c and x.t and math.abs(x.t - s.t) <= SAME_STATE and (x.t == s.t or ns.sameSnapshot(x, s)) then
-      return true
+      return x
     end
   end
-  return false
+  return nil
 end
 
 local function snapshotOf(e)
@@ -381,9 +388,18 @@ local function onEntry(msg, char)
     queueAck(c, t) -- bestätigen, sonst versucht es der Absender immer wieder
     return
   end
-  if id and (c == char or not DB.links[c]) then DB.links[c] = id end
+  -- Konto-ID nur für den Absender selbst (ab 1.7.0): Sonst könnte jedes Mitglied fremde Charaktere ohne
+  -- Konto auf sein Konto ziehen. Twinks bekommen ihre Zuordnung mit ihrer eigenen Meldung „1;…“.
+  if id and c == char then DB.links[c] = id end
   local s = snapshotOf({ c = c, t = t, l = l, cls = cls ~= "" and cls or nil, m = m, d = d, p = p })
-  if known(s) then
+  local x = known(s)
+  if x and x.t == s.t and x.m == nil and s.m ~= nil and ns.sameSnapshot(x, { l = s.l, cls = s.cls, d = s.d, p = s.p }) then
+    -- Derselbe Stand kam schon ohne Gold (Meldung an die Gilde), das geflüsterte Gold ging nicht durch
+    x.m = s.m
+    ns.state.newEntries = ns.state.newEntries + 1
+    ns.changed()
+    stats.ok = stats.ok + 1
+  elseif x then
     stats.dup = stats.dup + 1
   else
     s.rt = now()

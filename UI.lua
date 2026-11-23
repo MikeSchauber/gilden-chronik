@@ -2,7 +2,8 @@
 -- danach über /gchr, das Yak-Symbol an der Minimap (Options.lua) oder das Addon-Menü. Farben aus dem Theme der
 -- Web-App (app/assets/css/main.css), Logik und Zustand in GildenChronik.lua. Zweite Seite
 -- „Kills & Diagnose“ mit Boss-Versuchen, Postausgang, Messdaten und Log aus Kills.lua; die Zeile
--- „Verlauf“ zeigt den Postausgang der Levelaufstiege aus Verlauf.lua.
+-- „Verlauf“ zeigt den Postausgang der Levelaufstiege aus Verlauf.lua, die Zeile „Statistik“ den der
+-- Statistiken aus Statistik.lua.
 
 local ADDON, ns = ...
 
@@ -123,7 +124,7 @@ local statusTitle = text("GameFontNormalSmall", C.gold)
 statusTitle:SetText("STATUS")
 
 local rows, rowByLabel = {}, {}
-for _, label in ipairs({ "Gilde", "Konto", "Gold", "Sammler", "Deine Meldung", "Verlauf", "Empfangen", "Gesammelt", "Datei" }) do
+for _, label in ipairs({ "Gilde", "Konto", "Gold", "Sammler", "Deine Meldung", "Verlauf", "Statistik", "Empfangen", "Gesammelt", "Datei" }) do
   local row = {
     dot = f:CreateTexture(nil, "ARTWORK"),
     label = text("GameFontHighlight", C.muted, LABEL_W - 14),
@@ -152,7 +153,8 @@ local PATH = "World of Warcraft\\_<Version>_\\WTF\\Account\\<Account>\\SavedVari
 
 local GUIDE = {
   member = {
-    "Das Addon meldet deinen Charakter beim Einloggen und bei jeder Änderung an die Gilde: Level, Berufe und Tode. Gold nur, wenn du unter " .. hl("Einstellungen") .. " " .. hl("Ich teile mein Gold mit der Chronik") .. " anhakst.",
+    "Das Addon meldet deinen Charakter beim Einloggen und bei jeder Änderung an die Gilde: Level, Berufe und Tode. Gold nur, wenn du unter " .. hl("Einstellungen") .. " " .. hl("Ich teile mein Gold mit der Chronik") .. " anhakst, und dann nur an den Sammler.",
+    "Statistiken aus deinem Charakterfenster (Kreaturen, Quests, Dungeons, Endbosse, Tode …) nur, wenn du unter " .. hl("Einstellungen") .. " " .. hl("Ich teile meine Statistiken mit der Chronik") .. " anhakst. Wer sie in der Web-App sieht, legst du dort unter Mein Profil mit " .. hl("Statistiken teilen") .. " fest.",
     "Einmal die Konto-ID einfügen: In der Web-App unter Mein Profil auf " .. hl("ID kopieren") .. " klicken, oben unter " .. hl("Konto") .. " mit Strg+V einfügen und " .. hl("Übernehmen") .. ". Dann gehören deine Charaktere direkt zu deinem Konto.",
     "Ankommen müssen die Daten beim " .. hl("Sammler") .. ". Gleichzeitig spielen müsst ihr dafür nicht: Dein Addon merkt sich jeden Levelaufstieg mit deinem ganzen Stand (Gold, Berufe, Tode) und schickt diesen " .. hl("Verlauf") .. " dem Sammler, sobald er online ist, auch für deine anderen Charaktere. So fehlt in der Chronik kein Level.",
     "Ob deine Daten angekommen sind, steht oben unter " .. hl("Sammler") .. ". " .. hl("Jetzt senden") .. " schickt deinen Stand sofort.",
@@ -282,7 +284,7 @@ check:SetScript("OnLeave", function() GameTooltip:Hide() end)
 local footerLine = line()
 
 local optionsButton = button("Einstellungen",
-  "Symbol an der Minimap, Sammler und Erinnerung an /reload. Auch im Spielmenü unter Optionen → AddOns.",
+  "Gold und Statistiken teilen, Symbol an der Minimap, Sammler und Erinnerung an /reload. Auch im Spielmenü unter Optionen → AddOns.",
   function()
     if ns.openOptions then ns.openOptions() end
   end)
@@ -527,6 +529,37 @@ local function historyStatus(inGuild)
     :format(count(h.open, "Stand", "Stände"), levels, h.open == 1 and "wartet" or "warten")
 end
 
+-- Statistiken aus dem Charakterfenster (Statistik.lua): geteilt, gelesen, beim Sammler oder wartend
+local function statsStatus(inGuild)
+  if not ns.statsView then
+    return C.warn, "Kommt erst nach einem Neustart von WoW, /reload reicht dafür nicht."
+  end
+  if not inGuild then return C.idle, "–" end
+  local s = ns.statsView()
+  if ns.isCollector() then
+    local own = s.shared and "Deine eigenen stehen direkt in deiner Datei" or "Deine eigenen teilst du nicht"
+    if s.recv.ok + s.recv.dup == 0 then return C.ok, ("Du sammelst. %s."):format(own) end
+    return C.ok, ("Du sammelst. %s, von anderen in dieser Sitzung: %s, dazu %s schon da.")
+      :format(own, count(s.recv.ok, "Stand", "Stände"), count(s.recv.dup, "Stand", "Stände"))
+  end
+  if not s.shared then
+    return C.idle, "Werden nicht gesendet. Zum Teilen oben unter Einstellungen „Ich teile meine Statistiken mit der Chronik“ anhaken."
+  end
+  if s.diag and s.diag.available == false then
+    return C.warn, "Nicht verfügbar: Dieser Client hat kein Statistikfenster."
+  end
+  if s.sending then
+    return C.ok, ("Wird gerade an den Sammler gesendet (%s offen)."):format(count(s.open, "Eintrag", "Einträge"))
+  end
+  if s.open > 0 then
+    return C.warn, ("%s %s auf den Sammler. Dein Addon schickt sie, sobald er online ist, du nicht in einer Instanz oder im Kampf bist und Bosskämpfe und Verlauf durch sind.")
+      :format(count(s.open, "Eintrag", "Einträge"), s.open == 1 and "wartet" or "warten")
+  end
+  if not s.readAt then return C.idle, "Werden ein paar Sekunden nach dem Einloggen gelesen." end
+  return C.ok, ("%s gelesen %s, alles beim Sammler. Wer sie sieht, legst du in der Web-App unter Mein Profil mit „Statistiken teilen“ fest.")
+    :format(count(s.values, "Wert", "Werte"), ago(s.readAt))
+end
+
 local function update()
   local db, st = ns.db(), ns.state
   local inGuild = IsInGuild()
@@ -553,7 +586,7 @@ local function update()
   if not idBox:HasFocus() then idBox:SetText(id or "") end
 
   if ns.sharesGold() then
-    setRow("Gold", C.ok, "Geht mit deinen Meldungen an die Chronik. Wer es sieht, legst du in der Web-App unter Mein Profil mit „Gold teilen“ fest.")
+    setRow("Gold", C.ok, "Geht mit deinen Meldungen an die Chronik, nur an den Sammler. Wer es sieht, legst du in der Web-App unter Mein Profil mit „Gold teilen“ fest.")
   else
     setRow("Gold", C.idle, "Wird nicht gesendet. Zum Teilen oben unter Einstellungen „Ich teile mein Gold mit der Chronik“ anhaken.")
   end
@@ -572,6 +605,7 @@ local function update()
   end
 
   setRow("Verlauf", historyStatus(inGuild))
+  setRow("Statistik", statsStatus(inGuild))
 
   if st.heardCount > 0 then
     setRow("Empfangen", C.ok, sentence(("%s mit Addon in dieser Sitzung, zuletzt %s %s")

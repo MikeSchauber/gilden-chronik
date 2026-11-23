@@ -1074,6 +1074,9 @@ function ns.diagLines()
     add("Katalog", "Noch keiner. Kommt 20 s nach dem Login aus dem Spiel.", "idle")
   end
 
+  -- Statistiken aus dem Charakterfenster (Statistik.lua)
+  if ns.statsDiagLine then lines[#lines + 1] = ns.statsDiagLine() end
+
   local secrets = pairsText(d.secrets, { { "encounter", "Boss" }, { "instance", "Instanz" }, { "group", "Gruppe" }, { "target", "Ziel" }, { "ej", "Abenteuerführer" }, { "lfg", "Gruppensuche" }, { "andere", "andere" } })
   add("Geheime Werte", #secrets > 0 and table.concat(secrets, ", ") or "keine", #secrets > 0 and "warn" or "ok")
 

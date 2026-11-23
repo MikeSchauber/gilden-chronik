@@ -5,7 +5,10 @@
 -- hört, und die Level aus der Gildenliste, also auch für Mitglieder ohne Addon.
 -- Die Daten landen erst bei /reload oder Logout auf der Platte.
 -- Das Fenster (Status und Anleitung) steckt in UI.lua, Boss-Versuche und Diagnose in Kills.lua,
--- der Verlauf (Levelaufstiege, die der Sammler verpasst hat, nachliefern) in Verlauf.lua.
+-- der Verlauf (Levelaufstiege, die der Sammler verpasst hat, nachliefern) in Verlauf.lua, die
+-- Statistiken aus dem Charakterfenster in Statistik.lua.
+-- Gold geht nie an die ganze Gilde (ab 1.7.0): Mit „Ich teile mein Gold“ flüstert das Addon dieselbe
+-- Meldung mit Gold einem Sammler, der online ist; sonst kommt der Stand mit Gold in den Verlauf.
 
 local ADDON, ns = ...
 local PREFIX = "GCHR"
@@ -176,10 +179,10 @@ function ns.queueAck(id, build, sent)
   ns.flushAcks()
 end
 
--- Postausgänge an den Sammler (Boss-Versuche in Kills.lua, Verlauf in Verlauf.lua): Immer nur einer
--- flüstert und wartet auf seine Bestätigung, sonst greift die Drosselung von WoW. Wer fertig ist,
--- gibt frei und stößt die anderen an (Boss-Versuche zuerst, die braucht der Kalender noch am selben
--- Abend, dann der Verlauf).
+-- Postausgänge an den Sammler (Boss-Versuche in Kills.lua, Verlauf in Verlauf.lua, Statistiken in
+-- Statistik.lua): Immer nur einer flüstert und wartet auf seine Bestätigung, sonst greift die
+-- Drosselung von WoW. Wer fertig ist, gibt frei und stößt die anderen an (Boss-Versuche zuerst, die
+-- braucht der Kalender noch am selben Abend, dann der Verlauf, dann die Statistiken).
 local outboxOwner
 
 function ns.claimOutbox(who)
@@ -194,6 +197,7 @@ function ns.releaseOutbox(who)
   C_Timer.After(ACK_GAP, function()
     if ns.pumpKills then ns.pumpKills() end
     if ns.pumpHistory then ns.pumpHistory() end
+    if ns.pumpStats then ns.pumpStats() end
   end)
 end
 
@@ -307,14 +311,23 @@ local function broadcast(force)
   -- verpasst hat, speichert ihn so mit der richtigen Zeit (z. B. Levelaufstieg, als er offline war).
   local last = DB.latest[cur.name]
   local at = s.t or (last and same(last, s) and last.t) or ""
-  -- Höchstens etwa 180 Byte (Grenze 255), auch mit fünf langen Berufen und der Konto-ID
-  local msg = table.concat({ PROTO, s.l or "", s.cls or "", s.m or "", s.d, s.p, DB.profileId or "", at }, ";")
+  -- Höchstens etwa 180 Byte (Grenze 255), auch mit fünf langen Berufen und der Konto-ID. Gold nie im
+  -- Gildenkanal (ab 1.7.0): Den hört jedes Addon der Gilde mit, auch wenn das Gold privat ist.
+  local fields = { PROTO, s.l or "", s.cls or "", "", s.d, s.p, DB.profileId or "", at }
   -- Kann in Instanzen/Kampf gesperrt sein; dann geht die Meldung verloren und
   -- die nächste (Level-up, Gold, Login) holt es nach, Levelaufstiege auch der Verlauf.
-  local ok = send(msg, "GUILD")
+  local ok = send(table.concat(fields, ";"), "GUILD")
   if ok then state.sentAt = t else state.blockedAt = t end
+  local collector = ns.onlineCollector()
+  local delivered = ok and collector ~= nil
+  if s.m then
+    -- Mit „Gold teilen“ dieselbe Meldung mit Gold nur an den Sammler. Ist keiner online oder sperrt WoW
+    -- das Flüstern, gilt der Stand als nicht zugestellt und kommt mit Gold in den Verlauf.
+    fields[4] = s.m
+    delivered = collector ~= nil and send(table.concat(fields, ";"), "WHISPER", collector)
+  end
   -- Verlauf (Verlauf.lua): Levelaufstiege immer, sonst nur, was gerade kein Sammler hören konnte
-  if recorded and ns.onOwnSnapshot then ns.onOwnSnapshot(recorded, ok and ns.onlineCollector() ~= nil) end
+  if recorded and ns.onOwnSnapshot then ns.onOwnSnapshot(recorded, delivered) end
   changed()
 end
 
@@ -369,6 +382,20 @@ function ns.setShareGold(on)
   DB.shareGold = on or nil
   refreshLive()
   if IsInGuild() then broadcast(true) end -- gleich mit bzw. ohne Gold melden
+  if ns.readStatsSoon then ns.readStatsSoon(true) end -- Vermögen in den Statistiken
+  changed()
+end
+
+-- Statistiken aus dem Charakterfenster (Statistik.lua) nur mit Haken, Standard aus, gilt für den
+-- ganzen Account. Wer sie in der Web-App sieht, regelt dort „Statistiken teilen“. Ausschalten verwirft,
+-- was noch nicht beim Sammler ist.
+function ns.sharesStats()
+  return DB.shareStats == true
+end
+
+function ns.setShareStats(on)
+  DB.shareStats = on or nil
+  if ns.onShareStats then ns.onShareStats(on) end
   changed()
 end
 
@@ -391,9 +418,12 @@ function ns.setCollector(on)
   -- Gleich die Gildenliste lesen: Ohne Haken stand nichts davon in der Datei, und erst danach
   -- kennt der Sammler die Mitglieder, deren Boss-Versuche und Verlauf er annimmt.
   if on then scanRoster(true) end
-  -- Eigene Boss-Versuche und der Verlauf im Postausgang gehören jetzt in die eigene Datei
+  -- Eigene Boss-Versuche, Verlauf und Statistiken im Postausgang gehören jetzt in die eigene Datei
   if on and ns.pumpKills then ns.pumpKills() end
   if on and ns.pumpHistory then ns.pumpHistory() end
+  if on and ns.pumpStats then ns.pumpStats() end
+  -- Der Sammler liest die Namen aller Statistiken (Katalog), auch ohne die eigenen zu teilen
+  if on and ns.readStatsSoon then ns.readStatsSoon(true) end
   changed()
 end
 
@@ -440,9 +470,34 @@ local function onCollector(char, on, whisper)
       C_Timer.After(math.random(3, 30), function() broadcast(true) end)
       if ns.onCollectorOnline then ns.onCollectorOnline() end -- Postausgang (Kills.lua)
       if ns.onCollectorOnlineHistory then ns.onCollectorOnlineHistory() end -- Verlauf (Verlauf.lua)
+      if ns.onCollectorOnlineStats then ns.onCollectorOnlineStats() end -- Statistiken (Statistik.lua)
     end
   end
   changed()
+end
+
+-- Sammler: Stand aus einer Meldung. Ab 1.7.0 kommt sie im Gildenkanal ohne Gold und mit „Gold teilen“
+-- zusätzlich geflüstert mit Gold, beide mit demselben Zeitpunkt. Ohne Gold ist ein Stand, der sich sonst
+-- nicht geändert hat, nichts Neues; Gold zum gerade gehörten Stand ohne Gold ergänzt diesen, statt einen
+-- zweiten mit demselben Zeitpunkt anzulegen (den würde die Datenbank überspringen).
+local function recordData(char, s, at)
+  local last = DB.latest[char]
+  if last and s.m == nil and last.m ~= nil then
+    local probe = copy(s)
+    probe.m = last.m
+    if same(last, probe) then return end
+  end
+  if last and s.m ~= nil and last.m == nil and at and last.t == at then
+    local probe = copy(s)
+    probe.m = nil
+    if same(last, probe) then
+      last.m = s.m
+      state.newEntries = state.newEntries + 1
+      changed()
+      return last
+    end
+  end
+  return record(char, s, at)
 end
 
 -- Meldung eines anderen Mitglieds. Speichern (Stand, Konto-ID) und bestätigen nur als Sammler;
@@ -461,7 +516,7 @@ local function onData(char, sender, msg)
     -- Ab 1.1.0 mit dem Zeitpunkt des Stands; ältere Addons und Unplausibles: jetzt
     at = tonumber(at)
     if at and (at < MIN_TS or at > t + 60) then at = nil end
-    record(char, {
+    recordData(char, {
       l = tonumber(l),
       cls = (cls ~= "" and cls) or nil,
       m = tonumber(m),
@@ -514,7 +569,13 @@ local function onAddonMessage(prefix, msg, channel, sender)
   elseif kind == "H" or kind == "Q" then
     -- Verlauf (Verlauf.lua)
     if ns.onHistoryMessage then ns.onHistoryMessage(kind, msg, channel, sender, char) end
+  elseif kind == "S" or kind == "Y" then
+    -- Statistiken (Statistik.lua)
+    if ns.onStatsMessage then ns.onStatsMessage(kind, msg, channel, sender, char) end
   elseif channel == "GUILD" then
+    onData(char, sender, msg)
+  elseif channel == "WHISPER" and DB.collector and DB.latest[char] then
+    -- Meldung mit Gold, nur an den Sammler geflüstert (ab 1.7.0), nur von Mitgliedern, die er kennt
     onData(char, sender, msg)
   end
 end
@@ -583,6 +644,7 @@ local function init()
   DB.minimap = DB.minimap or {} -- Symbol an der Minimap: hide, angle (Grad)
   if ns.initKills then ns.initKills(DB) end -- kills, outbox, catalog, diag, log
   if ns.initHistory then ns.initHistory(DB) end -- history, own
+  if ns.initStats then ns.initStats(DB) end -- stats, statsOut, statReadings
   -- Rezepte aus dem Berufsfenster (nur 1.3.0) gibt es nicht mehr: Listen nicht weiter mitschleppen
   DB.recipes = nil
 end
@@ -765,6 +827,18 @@ SlashCmdList.GILDENCHRONIK = function(msg)
       local h = ns.historyView()
       say(h.open == 0 and "Verlauf: alles beim Sammler."
         or ("Verlauf: %d Stände warten auf den Sammler, davon %d Levelaufstiege."):format(h.open, h.levels))
+    end
+    if ns.statsView then
+      local s = ns.statsView()
+      if ns.isCollector() then
+        say(("Statistik: %d Stände in der Datei, in dieser Sitzung %d von anderen empfangen."):format(s.readings, s.recv.ok))
+      elseif not s.shared then
+        say("Statistik: nicht geteilt (Einstellungen: „Ich teile meine Statistiken mit der Chronik“).")
+      elseif s.open == 0 then
+        say(s.readAt and "Statistik: alles beim Sammler." or "Statistik: noch nicht gelesen.")
+      else
+        say(("Statistik: %d %s auf den Sammler."):format(s.open, s.open == 1 and "Eintrag wartet" or "Einträge warten"))
+      end
     end
   elseif ns.toggleWindow then
     ns.toggleWindow()
